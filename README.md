@@ -1,9 +1,8 @@
 # waybar-media-cava
 
 A [waybar](https://github.com/Alexays/Waybar) **CFFI plugin** that combines an
-**MPRIS media widget** with a **live cava audio visualiser** in one module, styled
-after the [DankMaterialShell](https://github.com/AvengeMedia/DankMaterialShell)
-(DMS) compact media widget.
+**MPRIS media widget** with a **live cava audio visualiser** in one module — a
+compact top-bar media widget.
 
 Layout, left → right:
 
@@ -13,8 +12,8 @@ Layout, left → right:
 ```
 
 - **Visualiser:** spawns the real `cava` binary (raw output) and draws 6 rounded
-  bars, vertically centred/mirrored, with a `sqrt` level curve — the same motion
-  as DMS's `viz_bars.frag`. The bar colour follows the widget's CSS `color`, so it
+  bars, vertically centred/mirrored, with a `sqrt` level curve. The bar colour
+  follows the widget's CSS `color`, so it
   tracks your matugen accent automatically.
 - **Media:** track `title • artist` from `playerctl --follow`, live. Transport
   controls (prev / play-pause / next) dispatch `playerctl`. The play button fills
@@ -59,7 +58,7 @@ Options:
 | `smoothing` | 0.35 | easing factor per frame (0–1; lower = smoother/slower) |
 | `controls` | 1 | show the prev / play-pause / next buttons |
 | `max-length` | 40 | max characters of the title before ellipsis |
-| `art-size` | 0 | album-art size (px); `0` disables art (DMS bar has none) |
+| `art-size` | 0 | album-art size (px); `0` disables art |
 
 ## style.css
 

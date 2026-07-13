@@ -1,17 +1,17 @@
-// waybar CFFI plugin: combined MPRIS media + live cava audio visualiser, styled
-// to match the DankMaterialShell (DMS) compact top-bar media widget.
+// waybar CFFI plugin: combined MPRIS media + live cava audio visualiser — a
+// compact top-bar media widget.
 //
-// Layout (left → right), matching DMS Modules/DankBar/Widgets/Media.qml:
+// Layout (left → right):
 //   [6-bar visualiser] [title • artist] [prev] [play/pause] [next]
 //
 //  - Visualiser: spawns `cava` (raw ascii) and draws 6 rounded bars, vertically
-//    centred/mirrored, height mapped with a sqrt curve (like DMS's viz_bars.frag).
+//    centred/mirrored, height mapped with a sqrt curve.
 //    The bar colour follows the drawing area's CSS `color` (matugen @primary).
 //  - Media info + art URL come from `playerctl --follow`; controls dispatch
 //    playerctl previous / play-pause / next. When no player exists the widget
 //    hides and waybar collapses it.
-//  - Optional album art (art-size > 0) is shown before the visualiser (DMS shows
-//    art only in its popup, so this defaults off).
+//  - Optional album art (art-size > 0) is shown before the visualiser (off by
+//    default — the bar shows none).
 #define _GNU_SOURCE
 #include <gtk/gtk.h>
 #include <gio/gio.h>
@@ -133,7 +133,7 @@ static void cava_line(Instance *self, const char *line) {
     if (end == p) break;
     double n = v / 1000.0;
     if (n < 0) n = 0; else if (n > 1) n = 1;
-    n = sqrt(n);                                 // emphasise low levels (DMS curve)
+    n = sqrt(n);                                 // emphasise low levels
     self->target[i++] = self->playing ? n : 0.0;
     p = end;
     while (*p == ';' || *p == ' ') p++;
@@ -231,7 +231,7 @@ static void update_media(Instance *self, const char *status, const char *title,
   if (!self->have_player) { gtk_widget_hide(self->box); return; }
   gtk_widget_show(self->box);
 
-  // title • artist (DMS uses "  •  "); fall back to title / placeholder
+  // title • artist; fall back to title / placeholder
   char *label;
   if (title && *title && artist && *artist)
     label = g_strdup_printf("%s \xe2\x80\xa2 %s", title, artist);
@@ -306,7 +306,7 @@ static void write_cava_cfg(Instance *self) {
   char *source = (sink && *sink) ? g_strdup_printf("%s.monitor", sink) : g_strdup("auto");
   g_free(sink);
 
-  // Motion mirrors DMS's CavaService.qml; autosens=1 auto-gains so quiet sources
+  // autosens=1 auto-gains so quiet sources
   // (e.g. speech podcasts) still fill the bars instead of sitting near the floor.
   char *cfg = g_strdup_printf(
     "[general]\nbars = %d\nframerate = 30\nautosens = 1\nsensitivity = 100\n"
@@ -337,7 +337,7 @@ static GDataInputStream *spawn_reader(char **argv, GPid *pid_out) {
 void *wbcffi_init(const wbcffi_init_info *info,
                   const wbcffi_config_entry *entries, size_t entries_len) {
   Instance *self = g_new0(Instance, 1);
-  // Defaults are DMS geometry (20x20 slot, 6 bars) pre-scaled ~1.75x for this bar.
+  // Default geometry (20x20 slot, 6 bars) pre-scaled ~1.75x for this bar.
   self->bars = 6;
   self->bar_width = 4;
   self->bar_gap = 3;
@@ -345,7 +345,7 @@ void *wbcffi_init(const wbcffi_init_info *info,
   self->viz_height = 34;
   self->mirror = 1;
   self->smooth = 0.35;
-  self->art_size = 0;          // DMS bar has no album art
+  self->art_size = 0;          // no album art in the bar
   self->max_length = 40;
   self->show_controls = 1;
 
@@ -393,7 +393,7 @@ void *wbcffi_init(const wbcffi_init_info *info,
   gtk_box_pack_start(GTK_BOX(self->box), self->label, FALSE, FALSE, 0);
 
   if (self->show_controls) {
-    // DMS: prev/next 20px circles, play/pause 24px — pre-scaled ~1.75x for this bar.
+    // prev/next 20px circles, play/pause 24px — pre-scaled ~1.75x for this bar.
     self->btn_prev = make_ctrl(GLYPH_PREV, "media-prev", "previous", 34, NULL);
     self->btn_play = make_ctrl(GLYPH_PLAY, "media-play", "play-pause", 42, &self->lbl_play);
     self->btn_next = make_ctrl(GLYPH_NEXT, "media-next", "next", 34, NULL);
