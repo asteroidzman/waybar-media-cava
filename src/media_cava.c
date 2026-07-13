@@ -51,6 +51,7 @@ typedef struct {
 
   GPid cava_pid, pctl_pid;
   char *cava_cfg;
+  GCancellable *cancel;          // cancels pending async reads before teardown
 
   gboolean have_player, playing;
   char *art_url;
@@ -139,19 +140,51 @@ static void cava_line(Instance *self, const char *line) {
   ensure_anim(self);
 }
 
-static void cava_on_line(GObject *src, GAsyncResult *res, gpointer data);
-static void cava_read(Instance *self, GDataInputStream *in) {
-  g_data_input_stream_read_line_async(in, G_PRIORITY_DEFAULT_IDLE, NULL, cava_on_line, self);
+// ─── async line readers (cava + playerctl), teardown-safe ────────────────────
+// Each reader owns a ref to the instance's GCancellable, so it stays valid even
+// after `self` is freed on teardown. The callback checks cancellation BEFORE ever
+// touching `self` — this is what fixes the use-after-free crash on waybar reload
+// (matugen's SIGUSR2 on wallpaper change tears every module down and back up).
+static void pctl_handle(Instance *self, char *line);   // defined below
+
+typedef struct {
+  Instance *self;
+  GCancellable *cancel;
+  GDataInputStream *in;
+  gboolean pctl;
+} Reader;
+
+static void reader_done(Reader *r) {
+  g_object_unref(r->cancel);
+  g_object_unref(r->in);
+  g_free(r);
 }
-static void cava_on_line(GObject *src, GAsyncResult *res, gpointer data) {
-  Instance *self = data;
-  GDataInputStream *in = G_DATA_INPUT_STREAM(src);
+static void reader_cb(GObject *src, GAsyncResult *res, gpointer data);
+static void reader_next(Reader *r) {
+  g_data_input_stream_read_line_async(r->in,
+      r->pctl ? G_PRIORITY_DEFAULT : G_PRIORITY_DEFAULT_IDLE, r->cancel, reader_cb, r);
+}
+static void reader_cb(GObject *src, GAsyncResult *res, gpointer data) {
+  Reader *r = data;
   gsize len = 0;
-  char *line = g_data_input_stream_read_line_finish(in, res, &len, NULL);
-  if (!line) return;                             // pipe closed
-  if (len > 0) cava_line(self, line);
+  char *line = g_data_input_stream_read_line_finish(G_DATA_INPUT_STREAM(src), res, &len, NULL);
+  // Bail before touching self if we're being torn down (self may be freed) or the
+  // pipe closed. NB: a frame may have arrived just before cancel, so check the
+  // cancellable explicitly rather than trusting a non-NULL line.
+  if (g_cancellable_is_cancelled(r->cancel) || !line) { g_free(line); reader_done(r); return; }
+  if (r->pctl) pctl_handle(r->self, line);       // handles empty line = no player
+  else if (len > 0) cava_line(r->self, line);
   g_free(line);
-  cava_read(self, in);
+  reader_next(r);
+}
+static void reader_start(Instance *self, GDataInputStream *in, gboolean pctl) {
+  if (!in) return;
+  Reader *r = g_new0(Reader, 1);
+  r->self = self;
+  r->cancel = g_object_ref(self->cancel);
+  r->in = in;                                    // takes ownership
+  r->pctl = pctl;
+  reader_next(r);
 }
 
 // ─── album art (optional) ────────────────────────────────────────────────────
@@ -196,7 +229,6 @@ static void update_media(Instance *self, const char *status, const char *title,
 
   if (!self->have_player) { gtk_widget_hide(self->box); return; }
   gtk_widget_show(self->box);
-  if (self->art_size <= 0) gtk_widget_hide(self->art);   // keep controls/label shown
 
   // title • artist (DMS uses "  •  "); fall back to title / placeholder
   char *label;
@@ -223,25 +255,12 @@ static void update_media(Instance *self, const char *status, const char *title,
   if (self->playing) ensure_anim(self);
 }
 
-static void pctl_on_line(GObject *src, GAsyncResult *res, gpointer data);
-static void pctl_read(GDataInputStream *in, Instance *self) {
-  g_data_input_stream_read_line_async(in, G_PRIORITY_DEFAULT, NULL, pctl_on_line, self);
-}
-static void pctl_on_line(GObject *src, GAsyncResult *res, gpointer data) {
-  Instance *self = data;
-  GDataInputStream *in = G_DATA_INPUT_STREAM(src);
-  gsize len = 0;
-  char *line = g_data_input_stream_read_line_finish(in, res, &len, NULL);
-  if (!line) return;
-  if (len == 0) {
-    update_media(self, "", "", "", "");         // no player
-  } else {
-    char *f[4] = {0}, *save = NULL, *tok = strtok_r(line, "\t", &save);
-    for (int i = 0; i < 4 && tok; i++) { f[i] = tok; tok = strtok_r(NULL, "\t", &save); }
-    update_media(self, f[0] ? f[0] : "", f[1] ? f[1] : "", f[2] ? f[2] : "", f[3] ? f[3] : "");
-  }
-  g_free(line);
-  pctl_read(in, self);
+// playerctl line: "status \t title \t artist \t artUrl"; empty line = no player.
+static void pctl_handle(Instance *self, char *line) {
+  if (!*line) { update_media(self, "", "", "", ""); return; }
+  char *f[4] = {0}, *save = NULL, *tok = strtok_r(line, "\t", &save);
+  for (int i = 0; i < 4 && tok; i++) { f[i] = tok; tok = strtok_r(NULL, "\t", &save); }
+  update_media(self, f[0] ? f[0] : "", f[1] ? f[1] : "", f[2] ? f[2] : "", f[3] ? f[3] : "");
 }
 
 // ─── control clicks → playerctl ──────────────────────────────────────────────
@@ -343,6 +362,7 @@ void *wbcffi_init(const wbcffi_init_info *info,
     else if (!strcmp(k, "controls")) self->show_controls = atoi(v);
   }
   if (self->smooth <= 0 || self->smooth > 1) self->smooth = 0.35;
+  self->cancel = g_cancellable_new();
 
   GtkContainer *root = info->get_root_widget(info->obj);
   self->box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
@@ -387,22 +407,26 @@ void *wbcffi_init(const wbcffi_init_info *info,
 
   write_cava_cfg(self);
   char *cava_argv[] = {"cava", "-p", self->cava_cfg, NULL};
-  GDataInputStream *cin = spawn_reader(cava_argv, &self->cava_pid);
-  if (cin) cava_read(self, cin);
+  reader_start(self, spawn_reader(cava_argv, &self->cava_pid), FALSE);
 
   char *pctl_argv[] = {"playerctl", "--follow", "--format",
     "{{status}}\t{{title}}\t{{artist}}\t{{mpris:artUrl}}", "metadata", NULL};
-  GDataInputStream *pin = spawn_reader(pctl_argv, &self->pctl_pid);
-  if (pin) pctl_read(pin, self);
+  reader_start(self, spawn_reader(pctl_argv, &self->pctl_pid), TRUE);
 
   return self;
 }
 
 void wbcffi_deinit(void *instance) {
   Instance *self = instance;
+  // Cancel pending async reads FIRST: their callbacks check the NULL result and
+  // bail before touching `self`. Order matters — killing the children closes
+  // their pipes, which would otherwise complete a still-armed read into freed
+  // memory (the wallpaper-change / reload crash).
+  if (self->cancel) g_cancellable_cancel(self->cancel);   // readers bail + self-free
   if (self->anim_id) g_source_remove(self->anim_id);
   if (self->cava_pid) { kill(self->cava_pid, SIGTERM); g_spawn_close_pid(self->cava_pid); }
   if (self->pctl_pid) { kill(self->pctl_pid, SIGTERM); g_spawn_close_pid(self->pctl_pid); }
+  g_clear_object(&self->cancel);
   if (self->cava_cfg) { g_unlink(self->cava_cfg); g_free(self->cava_cfg); }
   g_free(self->art_url);
   g_free(self);
