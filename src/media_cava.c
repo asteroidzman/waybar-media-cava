@@ -57,7 +57,16 @@ typedef struct {
   gboolean have_player, playing;
   char *art_url;
   int art_size, max_length, show_controls;
+  char *icon_dir; int icon_size;
 } Instance;
+
+// Load a control icon SVG at the configured bar size.
+static GdkPixbuf *ctrl_pixbuf(Instance *self, const char *svg) {
+  char *p = g_build_filename(self->icon_dir, svg, NULL);
+  GdkPixbuf *pb = gdk_pixbuf_new_from_file_at_size(p, self->icon_size, self->icon_size, NULL);
+  g_free(p);
+  return pb;
+}
 
 // ─── rounded-rectangle cairo path ────────────────────────────────────────────
 static void rounded_rect(cairo_t *cr, double x, double y, double w, double h, double r) {
@@ -240,9 +249,11 @@ static void update_media(Instance *self, const char *status, const char *title,
   gtk_label_set_text(GTK_LABEL(self->label), label);
   g_free(label);
 
-  // play/pause glyph + a .playing class so CSS can fill the button with @primary
-  if (self->lbl_play)
-    gtk_label_set_text(GTK_LABEL(self->lbl_play), self->playing ? GLYPH_PAUSE : GLYPH_PLAY);
+  // play/pause icon + a .playing class so CSS can fill the button with @primary
+  if (self->lbl_play) {
+    GdkPixbuf *pb = ctrl_pixbuf(self, self->playing ? "pause.svg" : "play.svg");
+    if (pb) { gtk_image_set_from_pixbuf(GTK_IMAGE(self->lbl_play), pb); g_object_unref(pb); }
+  }
   if (self->btn_play) {
     GtkStyleContext *pc = gtk_widget_get_style_context(self->btn_play);
     if (self->playing) gtk_style_context_add_class(pc, "playing");
@@ -275,9 +286,9 @@ static gboolean on_ctrl(GtkWidget *w, GdkEventButton *ev, gpointer data) {
 }
 
 // A circular control button: GtkEventBox (keeps the compositor cursor; ignores CSS
-// box-model, so the round shape is sized here) + a centred glyph label.
-static GtkWidget *make_ctrl(const char *glyph, const char *cls, const char *cmd,
-                            int size, GtkWidget **glyph_out) {
+// box-model, so the round shape is sized here) + a centred image icon.
+static GtkWidget *make_ctrl(Instance *self, const char *svg, const char *cls, const char *cmd,
+                            int size, GtkWidget **img_out) {
   GtkWidget *b = gtk_event_box_new();
   gtk_widget_add_events(b, GDK_BUTTON_PRESS_MASK);
   gtk_widget_set_size_request(b, size, size);
@@ -285,12 +296,14 @@ static GtkWidget *make_ctrl(const char *glyph, const char *cls, const char *cmd,
   GtkStyleContext *c = gtk_widget_get_style_context(b);
   gtk_style_context_add_class(c, "media-btn");
   gtk_style_context_add_class(c, cls);
-  GtkWidget *l = gtk_label_new(glyph);
-  gtk_widget_set_halign(l, GTK_ALIGN_CENTER);
-  gtk_widget_set_valign(l, GTK_ALIGN_CENTER);
-  gtk_container_add(GTK_CONTAINER(b), l);
+  GtkWidget *im = gtk_image_new();
+  GdkPixbuf *pb = ctrl_pixbuf(self, svg);
+  if (pb) { gtk_image_set_from_pixbuf(GTK_IMAGE(im), pb); g_object_unref(pb); }
+  gtk_widget_set_halign(im, GTK_ALIGN_CENTER);
+  gtk_widget_set_valign(im, GTK_ALIGN_CENTER);
+  gtk_container_add(GTK_CONTAINER(b), im);
   g_signal_connect(b, "button-press-event", G_CALLBACK(on_ctrl), (gpointer)cmd);
-  if (glyph_out) *glyph_out = l;
+  if (img_out) *img_out = im;
   return b;
 }
 
@@ -348,9 +361,12 @@ void *wbcffi_init(const wbcffi_init_info *info,
   self->art_size = 0;          // no album art in the bar
   self->max_length = 40;
   self->show_controls = 1;
+  self->icon_size = 24;
 
   for (size_t i = 0; i < entries_len; i++) {
     const char *k = entries[i].key, *v = entries[i].value;
+    if (!strcmp(k, "icon-size")) { self->icon_size = atoi(v); if (self->icon_size < 8) self->icon_size = 8; continue; }
+    if (!strcmp(k, "icon-dir")) { g_free(self->icon_dir); self->icon_dir = g_strdup(v); continue; }
     if (!strcmp(k, "bars")) self->bars = CLAMP(atoi(v), 1, MAXBARS);
     else if (!strcmp(k, "bar-width")) self->bar_width = atoi(v);
     else if (!strcmp(k, "bar-gap")) self->bar_gap = atoi(v);
@@ -363,6 +379,11 @@ void *wbcffi_init(const wbcffi_init_info *info,
     else if (!strcmp(k, "controls")) self->show_controls = atoi(v);
   }
   if (self->smooth <= 0 || self->smooth > 1) self->smooth = 0.35;
+  if (!self->icon_dir) {
+    const char *dh = g_getenv("XDG_DATA_HOME");
+    self->icon_dir = (dh && *dh) ? g_build_filename(dh, "waybar-media-cava", NULL)
+                                 : g_build_filename(g_get_home_dir(), ".local/share/waybar-media-cava", NULL);
+  }
   self->cancel = g_cancellable_new();
 
   GtkContainer *root = info->get_root_widget(info->obj);
@@ -394,9 +415,9 @@ void *wbcffi_init(const wbcffi_init_info *info,
 
   if (self->show_controls) {
     // prev/next 20px circles, play/pause 24px — pre-scaled ~1.75x for this bar.
-    self->btn_prev = make_ctrl(GLYPH_PREV, "media-prev", "previous", 34, NULL);
-    self->btn_play = make_ctrl(GLYPH_PLAY, "media-play", "play-pause", 42, &self->lbl_play);
-    self->btn_next = make_ctrl(GLYPH_NEXT, "media-next", "next", 34, NULL);
+    self->btn_prev = make_ctrl(self, "prev.svg", "media-prev", "previous", 34, NULL);
+    self->btn_play = make_ctrl(self, "play.svg", "media-play", "play-pause", 42, &self->lbl_play);
+    self->btn_next = make_ctrl(self, "next.svg", "media-next", "next", 34, NULL);
     gtk_box_pack_start(GTK_BOX(self->box), self->btn_prev, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(self->box), self->btn_play, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(self->box), self->btn_next, FALSE, FALSE, 0);
@@ -432,5 +453,6 @@ void wbcffi_deinit(void *instance) {
   g_clear_object(&self->cancel);
   if (self->cava_cfg) { g_unlink(self->cava_cfg); g_free(self->cava_cfg); }
   g_free(self->art_url);
+  g_free(self->icon_dir);
   g_free(self);
 }

@@ -4,13 +4,15 @@ CFLAGS  ?= -O2 -Wall -Wextra
 CFLAGS  += -fPIC $(shell pkg-config --cflags $(PKGS))
 LDLIBS  += $(shell pkg-config --libs $(PKGS)) -lm
 PREFIX  ?= $(HOME)/.local/lib/waybar
+DATADIR ?= $(HOME)/.local/share/waybar-media-cava
 
 $(PLUGIN): src/media_cava.c
 	$(CC) $(CFLAGS) -shared -o $@ $< $(LDLIBS)
 
 install: $(PLUGIN)
 	install -Dm755 $(PLUGIN) $(PREFIX)/$(PLUGIN)
-	@echo "installed to $(PREFIX)/$(PLUGIN)"
+	install -Dm644 -t $(DATADIR) assets/prev.svg assets/play.svg assets/pause.svg assets/next.svg
+	@echo "installed to $(PREFIX)/$(PLUGIN) + icons in $(DATADIR)"
 
 clean:
 	rm -f $(PLUGIN)
