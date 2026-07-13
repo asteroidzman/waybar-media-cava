@@ -21,6 +21,7 @@
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
 
 #include "waybar_cffi_module.h"
 const size_t wbcffi_version = 1;
@@ -424,8 +425,10 @@ void wbcffi_deinit(void *instance) {
   // memory (the wallpaper-change / reload crash).
   if (self->cancel) g_cancellable_cancel(self->cancel);   // readers bail + self-free
   if (self->anim_id) g_source_remove(self->anim_id);
-  if (self->cava_pid) { kill(self->cava_pid, SIGTERM); g_spawn_close_pid(self->cava_pid); }
-  if (self->pctl_pid) { kill(self->pctl_pid, SIGTERM); g_spawn_close_pid(self->pctl_pid); }
+  // SIGTERM then reap — spawned with DO_NOT_REAP_CHILD, so we must waitpid or the
+  // killed child lingers as a zombie (one per reload otherwise).
+  if (self->cava_pid) { kill(self->cava_pid, SIGTERM); waitpid(self->cava_pid, NULL, 0); g_spawn_close_pid(self->cava_pid); }
+  if (self->pctl_pid) { kill(self->pctl_pid, SIGTERM); waitpid(self->pctl_pid, NULL, 0); g_spawn_close_pid(self->pctl_pid); }
   g_clear_object(&self->cancel);
   if (self->cava_cfg) { g_unlink(self->cava_cfg); g_free(self->cava_cfg); }
   g_free(self->art_url);
