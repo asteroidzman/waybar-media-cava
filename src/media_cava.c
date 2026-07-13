@@ -60,12 +60,33 @@ typedef struct {
   char *icon_dir; int icon_size;
 } Instance;
 
-// Load a control icon SVG at the configured bar size.
-static GdkPixbuf *ctrl_pixbuf(Instance *self, const char *svg) {
-  char *p = g_build_filename(self->icon_dir, svg, NULL);
-  GdkPixbuf *pb = gdk_pixbuf_new_from_file_at_size(p, self->icon_size, self->icon_size, NULL);
+// Load a control icon SVG and recolour the silhouette to the widget's theme colour.
+static GdkPixbuf *themed_pixbuf(GtkWidget *w, const char *dir, int size, const char *name) {
+  char *p = g_build_filename(dir, name, NULL);
+  GdkPixbuf *src = gdk_pixbuf_new_from_file_at_size(p, size, size, NULL);
   g_free(p);
-  return pb;
+  if (!src) return NULL;
+  GdkPixbuf *d = gdk_pixbuf_get_has_alpha(src) ? gdk_pixbuf_copy(src)
+                                               : gdk_pixbuf_add_alpha(src, FALSE, 0, 0, 0);
+  g_object_unref(src);
+  GdkRGBA c; GtkStyleContext *sc = gtk_widget_get_style_context(w);
+  gtk_style_context_get_color(sc, gtk_style_context_get_state(sc), &c);
+  guchar R = (guchar)(c.red*255), G = (guchar)(c.green*255), B = (guchar)(c.blue*255);
+  int wd = gdk_pixbuf_get_width(d), h = gdk_pixbuf_get_height(d);
+  int rs = gdk_pixbuf_get_rowstride(d), nc = gdk_pixbuf_get_n_channels(d);
+  guchar *px = gdk_pixbuf_get_pixels(d);
+  for (int y = 0; y < h; y++) for (int x = 0; x < wd; x++) {
+    guchar *q = px + y*rs + x*nc; q[0]=R; q[1]=G; q[2]=B;
+    if (nc == 4) q[3] = (guchar)(q[3]*c.alpha);
+  }
+  return d;
+}
+static void icon_restyle(GtkWidget *img, gpointer data) {
+  Instance *self = data;
+  const char *name = g_object_get_data(G_OBJECT(img), "svg");
+  if (!name) return;
+  GdkPixbuf *pb = themed_pixbuf(img, self->icon_dir, self->icon_size, name);
+  if (pb) { gtk_image_set_from_pixbuf(GTK_IMAGE(img), pb); g_object_unref(pb); }
 }
 
 // ─── rounded-rectangle cairo path ────────────────────────────────────────────
@@ -249,15 +270,17 @@ static void update_media(Instance *self, const char *status, const char *title,
   gtk_label_set_text(GTK_LABEL(self->label), label);
   g_free(label);
 
-  // play/pause icon + a .playing class so CSS can fill the button with @primary
-  if (self->lbl_play) {
-    GdkPixbuf *pb = ctrl_pixbuf(self, self->playing ? "pause.svg" : "play.svg");
-    if (pb) { gtk_image_set_from_pixbuf(GTK_IMAGE(self->lbl_play), pb); g_object_unref(pb); }
-  }
+  // .playing class first (so the icon recolours to @on_primary on the accent fill),
+  // then swap the play/pause icon.
   if (self->btn_play) {
     GtkStyleContext *pc = gtk_widget_get_style_context(self->btn_play);
     if (self->playing) gtk_style_context_add_class(pc, "playing");
     else gtk_style_context_remove_class(pc, "playing");
+  }
+  if (self->lbl_play) {
+    g_object_set_data_full(G_OBJECT(self->lbl_play), "svg",
+                           g_strdup(self->playing ? "pause.svg" : "play.svg"), g_free);
+    icon_restyle(self->lbl_play, self);
   }
 
   g_free(self->art_url);
@@ -297,8 +320,9 @@ static GtkWidget *make_ctrl(Instance *self, const char *svg, const char *cls, co
   gtk_style_context_add_class(c, "media-btn");
   gtk_style_context_add_class(c, cls);
   GtkWidget *im = gtk_image_new();
-  GdkPixbuf *pb = ctrl_pixbuf(self, svg);
-  if (pb) { gtk_image_set_from_pixbuf(GTK_IMAGE(im), pb); g_object_unref(pb); }
+  g_object_set_data_full(G_OBJECT(im), "svg", g_strdup(svg), g_free);
+  g_signal_connect(im, "style-updated", G_CALLBACK(icon_restyle), self);
+  icon_restyle(im, self);
   gtk_widget_set_halign(im, GTK_ALIGN_CENTER);
   gtk_widget_set_valign(im, GTK_ALIGN_CENTER);
   gtk_container_add(GTK_CONTAINER(b), im);
