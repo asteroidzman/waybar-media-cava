@@ -286,9 +286,10 @@ static void write_cava_cfg(Instance *self) {
   char *source = (sink && *sink) ? g_strdup_printf("%s.monitor", sink) : g_strdup("auto");
   g_free(sink);
 
-  // Values mirror DMS's CavaService.qml so the motion feels the same.
+  // Motion mirrors DMS's CavaService.qml; autosens=1 auto-gains so quiet sources
+  // (e.g. speech podcasts) still fill the bars instead of sitting near the floor.
   char *cfg = g_strdup_printf(
-    "[general]\nbars = %d\nframerate = 30\nautosens = 0\nsensitivity = 30\n"
+    "[general]\nbars = %d\nframerate = 30\nautosens = 1\nsensitivity = 100\n"
     "lower_cutoff_freq = 50\nhigher_cutoff_freq = 12000\n"
     "[input]\nmethod = pipewire\nsource = %s\n"
     "[output]\nmethod = raw\nraw_target = /dev/stdout\ndata_format = ascii\n"
