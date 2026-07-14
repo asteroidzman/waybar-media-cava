@@ -16,9 +16,11 @@
 #include <gtk/gtk.h>
 #include <gio/gio.h>
 #include <gio/gunixinputstream.h>
+#include "wbcommon.h"
 #include <glib/gstdio.h>
 #include <math.h>
 #include <signal.h>
+#include <sys/prctl.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
@@ -50,9 +52,8 @@ typedef struct {
   double smooth;           // easing factor / frame
   guint anim_id;           // 60fps easing timer (0 = stopped)
 
-  GPid cava_pid, pctl_pid;
+  WbReader *cava_rdr, *pctl_rdr;
   char *cava_cfg;
-  GCancellable *cancel;          // cancels pending async reads before teardown
 
   gboolean have_player, playing;
   char *art_url;
@@ -171,52 +172,12 @@ static void cava_line(Instance *self, const char *line) {
   ensure_anim(self);
 }
 
-// ─── async line readers (cava + playerctl), teardown-safe ────────────────────
-// Each reader owns a ref to the instance's GCancellable, so it stays valid even
-// after `self` is freed on teardown. The callback checks cancellation BEFORE ever
-// touching `self` — this is what fixes the use-after-free crash on waybar reload
-// (matugen's SIGUSR2 on wallpaper change tears every module down and back up).
+// ─── line readers (cava + playerctl) via WbReader: die with the bar
+// (PDEATHSIG) and respawn with backoff if the child exits (audio-server or
+// playerctl restart) — the visualiser/metadata recover on their own.
 static void pctl_handle(Instance *self, char *line);   // defined below
-
-typedef struct {
-  Instance *self;
-  GCancellable *cancel;
-  GDataInputStream *in;
-  gboolean pctl;
-} Reader;
-
-static void reader_done(Reader *r) {
-  g_object_unref(r->cancel);
-  g_object_unref(r->in);
-  g_free(r);
-}
-static void reader_cb(GObject *src, GAsyncResult *res, gpointer data);
-static void reader_next(Reader *r) {
-  g_data_input_stream_read_line_async(r->in,
-      r->pctl ? G_PRIORITY_DEFAULT : G_PRIORITY_DEFAULT_IDLE, r->cancel, reader_cb, r);
-}
-static void reader_cb(GObject *src, GAsyncResult *res, gpointer data) {
-  Reader *r = data;
-  gsize len = 0;
-  char *line = g_data_input_stream_read_line_finish(G_DATA_INPUT_STREAM(src), res, &len, NULL);
-  // Bail before touching self if we're being torn down (self may be freed) or the
-  // pipe closed. NB: a frame may have arrived just before cancel, so check the
-  // cancellable explicitly rather than trusting a non-NULL line.
-  if (g_cancellable_is_cancelled(r->cancel) || !line) { g_free(line); reader_done(r); return; }
-  if (r->pctl) pctl_handle(r->self, line);       // handles empty line = no player
-  else if (len > 0) cava_line(r->self, line);
-  g_free(line);
-  reader_next(r);
-}
-static void reader_start(Instance *self, GDataInputStream *in, gboolean pctl) {
-  if (!in) return;
-  Reader *r = g_new0(Reader, 1);
-  r->self = self;
-  r->cancel = g_object_ref(self->cancel);
-  r->in = in;                                    // takes ownership
-  r->pctl = pctl;
-  reader_next(r);
-}
+static void on_cava_line(const char *line, gpointer user) { if (*line) cava_line(user, (char *)line); }
+static void on_pctl_line(const char *line, gpointer user) { pctl_handle(user, (char *)line); }
 
 // ─── album art (optional) ────────────────────────────────────────────────────
 static GdkPixbuf *round_pixbuf(GdkPixbuf *src, int size, double radius) {
@@ -357,18 +318,6 @@ static void write_cava_cfg(Instance *self) {
   g_free(cfg); g_free(source);
 }
 
-static GDataInputStream *spawn_reader(char **argv, GPid *pid_out) {
-  int out_fd = -1;
-  GError *err = NULL;
-  if (!g_spawn_async_with_pipes(NULL, argv, NULL,
-        G_SPAWN_SEARCH_PATH | G_SPAWN_DO_NOT_REAP_CHILD, NULL, NULL,
-        pid_out, NULL, &out_fd, NULL, &err)) {
-    if (err) { g_warning("media-cava: spawn failed: %s", err->message); g_error_free(err); }
-    return NULL;
-  }
-  GInputStream *is = g_unix_input_stream_new(out_fd, TRUE);
-  return g_data_input_stream_new(is);
-}
 
 // ─── CFFI entry points ───────────────────────────────────────────────────────
 void *wbcffi_init(const wbcffi_init_info *info,
@@ -408,7 +357,6 @@ void *wbcffi_init(const wbcffi_init_info *info,
     self->icon_dir = (dh && *dh) ? g_build_filename(dh, "waybar-media-cava", NULL)
                                  : g_build_filename(g_get_home_dir(), ".local/share/waybar-media-cava", NULL);
   }
-  self->cancel = g_cancellable_new();
 
   GtkContainer *root = info->get_root_widget(info->obj);
   self->box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
@@ -452,29 +400,23 @@ void *wbcffi_init(const wbcffi_init_info *info,
   gtk_widget_hide(self->box);           // until a player appears
 
   write_cava_cfg(self);
-  char *cava_argv[] = {"cava", "-p", self->cava_cfg, NULL};
-  reader_start(self, spawn_reader(cava_argv, &self->cava_pid), FALSE);
+  const char *cava_argv[] = {"cava", "-p", self->cava_cfg, NULL};
+  self->cava_rdr = wb_reader_start(cava_argv, on_cava_line, self, G_PRIORITY_DEFAULT_IDLE);
 
-  char *pctl_argv[] = {"playerctl", "--follow", "--format",
+  const char *pctl_argv[] = {"playerctl", "--follow", "--format",
     "{{status}}\t{{title}}\t{{artist}}\t{{mpris:artUrl}}", "metadata", NULL};
-  reader_start(self, spawn_reader(pctl_argv, &self->pctl_pid), TRUE);
+  self->pctl_rdr = wb_reader_start(pctl_argv, on_pctl_line, self, G_PRIORITY_DEFAULT);
 
   return self;
 }
 
 void wbcffi_deinit(void *instance) {
   Instance *self = instance;
-  // Cancel pending async reads FIRST: their callbacks check the NULL result and
-  // bail before touching `self`. Order matters — killing the children closes
-  // their pipes, which would otherwise complete a still-armed read into freed
-  // memory (the wallpaper-change / reload crash).
-  if (self->cancel) g_cancellable_cancel(self->cancel);   // readers bail + self-free
+  // Free the readers FIRST: they cancel pending async reads (callbacks bail
+  // before touching `self`) and force-exit the children.
+  wb_reader_free(self->cava_rdr);
+  wb_reader_free(self->pctl_rdr);
   if (self->anim_id) g_source_remove(self->anim_id);
-  // SIGTERM then reap — spawned with DO_NOT_REAP_CHILD, so we must waitpid or the
-  // killed child lingers as a zombie (one per reload otherwise).
-  if (self->cava_pid) { kill(self->cava_pid, SIGTERM); waitpid(self->cava_pid, NULL, 0); g_spawn_close_pid(self->cava_pid); }
-  if (self->pctl_pid) { kill(self->pctl_pid, SIGTERM); waitpid(self->pctl_pid, NULL, 0); g_spawn_close_pid(self->pctl_pid); }
-  g_clear_object(&self->cancel);
   if (self->cava_cfg) { g_unlink(self->cava_cfg); g_free(self->cava_cfg); }
   g_free(self->art_url);
   g_free(self->icon_dir);

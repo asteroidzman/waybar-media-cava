@@ -1,12 +1,13 @@
 PLUGIN  := libmedia_cava.so
-PKGS    := gtk+-3.0 gio-2.0 gio-unix-2.0
+PKGS    := gtk+-3.0 gio-2.0 gio-unix-2.0 gtk-layer-shell-0
+WBCOMMON ?= common
 CFLAGS  ?= -O2 -Wall -Wextra
-CFLAGS  += -fPIC $(shell pkg-config --cflags $(PKGS))
+CFLAGS  += -fPIC -I$(WBCOMMON) $(shell pkg-config --cflags $(PKGS))
 LDLIBS  += $(shell pkg-config --libs $(PKGS)) -lm
 PREFIX  ?= $(HOME)/.local/lib/waybar
 DATADIR ?= $(HOME)/.local/share/waybar-media-cava
 
-$(PLUGIN): src/media_cava.c
+$(PLUGIN): src/media_cava.c $(WBCOMMON)/wbcommon.h
 	$(CC) $(CFLAGS) -shared -o $@ $< $(LDLIBS)
 
 install: $(PLUGIN)
