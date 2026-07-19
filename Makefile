@@ -15,7 +15,13 @@ install: $(PLUGIN)
 	install -Dm644 -t $(DATADIR) assets/prev.svg assets/play.svg assets/pause.svg assets/next.svg
 	@echo "installed to $(PREFIX)/$(PLUGIN) + icons in $(DATADIR)"
 
-clean:
-	rm -f $(PLUGIN)
+test_media_cava: tests/test_media_cava.c src/media_cava.c $(WBCOMMON)/wbcommon.h
+	$(CC) $(CFLAGS) -o $@ tests/test_media_cava.c $(LDLIBS)
 
-.PHONY: install clean
+test: test_media_cava
+	./test_media_cava
+
+clean:
+	rm -f $(PLUGIN) test_media_cava
+
+.PHONY: install clean test
