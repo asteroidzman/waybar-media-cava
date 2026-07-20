@@ -24,6 +24,8 @@ Layout, left → right:
 
 ## Build & install
 
+Arch Linux: `yay -S waybar-media-cava` (AUR).
+
 Requires `gtk3`, `glib2` (dev headers), `cava`, `playerctl`, and a C compiler.
 
 ```sh
