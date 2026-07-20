@@ -28,7 +28,14 @@ Arch Linux: `yay -S waybar-media-cava` (AUR).
 
 Requires `gtk3`, `glib2` (dev headers), `cava`, `playerctl`, and a C compiler.
 
+Uses [waybar-plugin-common](https://github.com/asteroidzman/waybar-plugin-common)
+(git submodule at `common/`) -- clone with `--recursive`, or `git submodule
+update --init` after a plain clone, or `make` fails looking for
+`common/wbcommon.h`.
+
 ```sh
+git clone --recursive https://github.com/asteroidzman/waybar-media-cava.git
+cd waybar-media-cava
 make
 make install                 # → ~/.local/lib/waybar/libmedia_cava.so
 # or: PREFIX=/usr/lib/waybar sudo make install
