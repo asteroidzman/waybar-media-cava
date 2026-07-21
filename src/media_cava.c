@@ -47,10 +47,11 @@ typedef struct {
 
   // visualiser geometry (px, already scaled for this bar)
   int bars, bar_width, bar_gap, bar_min, viz_height, mirror;
+  int framerate;           // redraw + cava output rate (fps); caps GPU cost
   double levels[MAXBARS];  // eased, 0..1 (drawn)
   double target[MAXBARS];  // latest from cava, 0..1
   double smooth;           // easing factor / frame
-  guint anim_id;           // 60fps easing timer (0 = stopped)
+  guint anim_id;           // easing/redraw timer at `framerate` fps (0 = stopped)
 
   WbReader *cava_rdr, *pctl_rdr;
   char *cava_cfg;
@@ -151,7 +152,13 @@ static gboolean tick(gpointer data) {
 }
 
 static void ensure_anim(Instance *self) {
-  if (!self->anim_id) self->anim_id = g_timeout_add(16, tick, self);
+  if (!self->anim_id) {
+    // Defensive: never divide by an unset framerate. Config parse clamps it to
+    // 10..60, but a directly-constructed Instance (e.g. in unit tests) may not
+    // have run that path, and a /0 here would SIGFPE.
+    int fps = self->framerate > 0 ? self->framerate : 30;
+    self->anim_id = g_timeout_add(1000 / fps, tick, self);
+  }
 }
 
 // ─── cava: parse a raw ascii line "v0;v1;...;" (0..1000), sqrt curve ──────────
@@ -307,13 +314,13 @@ static void write_cava_cfg(Instance *self) {
   // autosens=1 auto-gains so quiet sources
   // (e.g. speech podcasts) still fill the bars instead of sitting near the floor.
   char *cfg = g_strdup_printf(
-    "[general]\nbars = %d\nframerate = 30\nautosens = 1\nsensitivity = 100\n"
+    "[general]\nbars = %d\nframerate = %d\nautosens = 1\nsensitivity = 100\n"
     "lower_cutoff_freq = 50\nhigher_cutoff_freq = 12000\n"
     "[input]\nmethod = pipewire\nsource = %s\n"
     "[output]\nmethod = raw\nraw_target = /dev/stdout\ndata_format = ascii\n"
     "ascii_max_range = 1000\nchannels = mono\n"
     "[smoothing]\nnoise_reduction = 35\n",
-    self->bars, source);
+    self->bars, self->framerate, source);
   g_file_set_contents(self->cava_cfg, cfg, -1, NULL);
   g_free(cfg); g_free(source);
 }
@@ -331,6 +338,8 @@ void *wbcffi_init(const wbcffi_init_info *info,
   self->viz_height = 34;
   self->mirror = 1;
   self->smooth = 0.35;
+  self->framerate = 30;        // redraw + cava rate; was a hardcoded 60fps
+                               // redraw timer, the main GPU cost while playing
   self->art_size = 0;          // no album art in the bar
   self->max_length = 40;
   self->show_controls = 1;
@@ -350,8 +359,16 @@ void *wbcffi_init(const wbcffi_init_info *info,
     else if (!strcmp(k, "art-size")) self->art_size = atoi(v);
     else if (!strcmp(k, "max-length")) self->max_length = atoi(v);
     else if (!strcmp(k, "controls")) self->show_controls = atoi(v);
+    else if (!strcmp(k, "framerate")) self->framerate = atoi(v);
   }
   if (self->smooth <= 0 || self->smooth > 1) self->smooth = 0.35;
+  // Clamp: 60 is the old behaviour ceiling; below ~10 the easing looks steppy.
+  self->framerate = CLAMP(self->framerate, 10, 60);
+  // `smooth` is a per-frame factor tuned at 60fps; at a lower framerate it would
+  // ease that many fewer times per second and the bars would lag the audio.
+  // Re-derive it from a framerate-independent time constant so the visual decay
+  // speed is identical regardless of framerate (and exactly the old value at 60).
+  self->smooth = 1.0 - pow(1.0 - self->smooth, 60.0 / self->framerate);
   if (!self->icon_dir) {
     const char *dh = g_getenv("XDG_DATA_HOME");
     self->icon_dir = (dh && *dh) ? g_build_filename(dh, "waybar-media-cava", NULL)
