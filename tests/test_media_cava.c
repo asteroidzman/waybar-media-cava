@@ -63,6 +63,15 @@ int main(void) {
 	CHECK_DOUBLE_EQ(partial.target[3], 0.99, "cava_line partial line: untouched index keeps its prior value (2)");
 	if (partial.anim_id) g_source_remove(partial.anim_id);
 
+	// media_should_show: only Playing/Paused earn a pill; Stopped/empty hide
+	// (a finished "Stopped" player must not leave a stale title on the bar).
+	CHECK(media_should_show("Playing"), "media_should_show(Playing) shows the pill");
+	CHECK(media_should_show("Paused"),  "media_should_show(Paused) shows the pill (resume affordance)");
+	CHECK(!media_should_show("Stopped"), "media_should_show(Stopped) hides (finished player, stale metadata)");
+	CHECK(!media_should_show(""),        "media_should_show(empty) hides (no player)");
+	CHECK(!media_should_show(NULL),      "media_should_show(NULL) hides (no player)");
+	CHECK(!media_should_show("bogus"),   "media_should_show(unknown state) hides");
+
 	printf("----\n%d failure(s)\n", failures);
 	return failures ? 1 : 0;
 }

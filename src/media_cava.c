@@ -221,10 +221,22 @@ static void set_art(Instance *self) {
 }
 
 // ─── media state from playerctl ──────────────────────────────────────────────
+
+// Which MPRIS states earn a bar pill: Playing/Paused only. A player that
+// finished lingers in MPRIS as "Stopped" (browsers especially) with its last
+// track's metadata still populated, so keying visibility off "status is
+// non-empty" left a stale "title • artist" on the bar with nothing actually
+// playing. Stopped, and any other non-empty non-play state, hide like no
+// player at all. Empty status = no player.
+static gboolean media_should_show(const char *status) {
+  return status && (strcmp(status, "Playing") == 0 ||
+                    strcmp(status, "Paused") == 0);
+}
+
 static void update_media(Instance *self, const char *status, const char *title,
                          const char *artist, const char *art) {
-  self->have_player = (status && *status);
   self->playing = (status && strcmp(status, "Playing") == 0);
+  self->have_player = media_should_show(status);
 
   if (!self->have_player) { gtk_widget_hide(self->box); return; }
   gtk_widget_show(self->box);
